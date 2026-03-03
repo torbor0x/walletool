@@ -1,0 +1,37 @@
+/novelty_wallets
+/node_modules
+.env
+.next
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node / build artifacts
+dist
+build
+coverage
+*.tsbuildinfo
+
+# Next.js
+out
+.next/cache
+
+# Tooling caches
+.turbo
+.cache
+
+# Local env files
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Deployment
+.vercel
+
+baseTerms.js
