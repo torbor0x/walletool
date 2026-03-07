@@ -1,10 +1,10 @@
 // app/page.js
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 export default function Home() {
-    const WALLET_FETCH_LIMIT = 1000;
+    const WALLET_PAGE_SIZE = 500;
     const SEARCH_DEBOUNCE_MS = 1000;
     const [wallets, setWallets] = useState([]);
     const [sessionFinds, setSessionFinds] = useState([]);
@@ -19,6 +19,9 @@ export default function Home() {
     const [nameStyleFilter, setNameStyleFilter] = useState('all');
     const [minSideLength, setMinSideLength] = useState(2);
     const [walletsLoading, setWalletsLoading] = useState(false);
+    const [walletsLoadingMore, setWalletsLoadingMore] = useState(false);
+    const [totalMatches, setTotalMatches] = useState(null);
+    const [hasMoreWallets, setHasMoreWallets] = useState(false);
     const [tableScope, setTableScope] = useState('all');
     const [searchTerm, setSearchTerm] = useState('');
     const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
@@ -50,16 +53,35 @@ export default function Home() {
     const eventSourceRef = useRef(null);
     const pollIntervalRef = useRef(null);
     const walletsFetchAbortRef = useRef(null);
+    const walletCountFetchAbortRef = useRef(null);
+    const latestWalletQueryKeyRef = useRef('');
+    const loadMoreSentinelRef = useRef(null);
     const collapseTimersRef = useRef(new Map());
 
-    const fetchWallets = async (searchValue = debouncedSearchTerm) => {
+    const makeWalletQueryKey = useCallback((searchValue = debouncedSearchTerm) => (
+        JSON.stringify({
+            minLength,
+            typeFilter,
+            exportedFilter,
+            archivedFilter,
+            nameStyleFilter,
+            minSideLength: typeFilter === 'addition' ? minSideLength : null,
+            search: (searchValue || '').trim().toLowerCase()
+        })
+    ), [minLength, typeFilter, exportedFilter, archivedFilter, nameStyleFilter, minSideLength, debouncedSearchTerm]);
+
+    const fetchWallets = useCallback(async ({ searchValue = debouncedSearchTerm, offset = 0, append = false } = {}) => {
+        const queryKey = makeWalletQueryKey(searchValue);
+        if (!append && Math.max(0, offset) === 0) {
+            latestWalletQueryKeyRef.current = queryKey;
+        }
         if (walletsFetchAbortRef.current) {
             try { walletsFetchAbortRef.current.abort(); } catch { }
         }
         const fetchController = new AbortController();
         walletsFetchAbortRef.current = fetchController;
         const buildWalletUrl = () => {
-            let url = `/api/wallets?minLength=${minLength}&limit=${WALLET_FETCH_LIMIT}`;
+            let url = `/api/wallets?minLength=${minLength}&limit=${WALLET_PAGE_SIZE}&offset=${Math.max(0, offset)}&includeTotal=0`;
             if (typeFilter !== 'all') url += `&type=${typeFilter}`;
             if (typeFilter === 'addition') url += `&minSideLength=${minSideLength}`;
             if (exportedFilter !== 'all') url += `&exported=${exportedFilter}`;
@@ -71,18 +93,91 @@ export default function Home() {
         const activeSearch = (searchValue || '').trim();
         if (activeSearch) url += `&search=${encodeURIComponent(activeSearch)}`;
         try {
-            setWalletsLoading(true);
+            if (!append && Math.max(0, offset) === 0) {
+                setHasMoreWallets(false);
+            }
+            if (append) setWalletsLoadingMore(true);
+            else setWalletsLoading(true);
             const res = await fetch(url, { cache: 'no-store', signal: fetchController.signal });
             if (!res.ok) throw new Error(`Wallet fetch failed (${res.status})`);
             const data = await res.json();
-            setWallets(Array.isArray(data) ? data : []);
+            const nextWallets = Array.isArray(data)
+                ? data
+                : (Array.isArray(data?.wallets) ? data.wallets : []);
+            const nextTotalMatches = Number.isFinite(data?.totalMatches)
+                ? data.totalMatches
+                : null;
+            if (latestWalletQueryKeyRef.current !== queryKey) return;
+            const fetchedOffset = Math.max(0, offset);
+            const loadedCount = fetchedOffset + nextWallets.length;
+            const moreByCount = Number.isFinite(nextTotalMatches)
+                ? loadedCount < nextTotalMatches
+                : nextWallets.length === WALLET_PAGE_SIZE;
+            if (Array.isArray(data)) {
+                // Backward compatibility for older API responses.
+                if (append) {
+                    setWallets(prev => {
+                        const seen = new Set(prev.map(w => w.publicKey));
+                        const appended = nextWallets.filter(w => !seen.has(w.publicKey));
+                        return [...prev, ...appended];
+                    });
+                } else {
+                    setWallets(nextWallets);
+                }
+                setTotalMatches(nextTotalMatches);
+                setHasMoreWallets(moreByCount);
+            } else {
+                if (append) {
+                    setWallets(prev => {
+                        const seen = new Set(prev.map(w => w.publicKey));
+                        const appended = nextWallets.filter(w => !seen.has(w.publicKey));
+                        return [...prev, ...appended];
+                    });
+                } else {
+                    setWallets(nextWallets);
+                }
+                if (Number.isFinite(nextTotalMatches)) {
+                    setTotalMatches(nextTotalMatches);
+                }
+                setHasMoreWallets(moreByCount);
+            }
         } catch (error) {
             if (error?.name === 'AbortError') return;
             setTerminalLines(prev => [...prev.slice(-200), `[ERROR] ${error.message}`]);
         } finally {
-            setWalletsLoading(false);
+            if (append) setWalletsLoadingMore(false);
+            else setWalletsLoading(false);
         }
-    };
+    }, [minLength, typeFilter, minSideLength, exportedFilter, archivedFilter, nameStyleFilter, debouncedSearchTerm, makeWalletQueryKey]);
+
+    const fetchWalletCount = useCallback(async (searchValue = debouncedSearchTerm) => {
+        const queryKey = makeWalletQueryKey(searchValue);
+        if (walletCountFetchAbortRef.current) {
+            try { walletCountFetchAbortRef.current.abort(); } catch { }
+        }
+        const fetchController = new AbortController();
+        walletCountFetchAbortRef.current = fetchController;
+        let url = `/api/wallets?minLength=${minLength}&limit=1&offset=0&includeTotal=1`;
+        if (typeFilter !== 'all') url += `&type=${typeFilter}`;
+        if (typeFilter === 'addition') url += `&minSideLength=${minSideLength}`;
+        if (exportedFilter !== 'all') url += `&exported=${exportedFilter}`;
+        if (archivedFilter !== 'not-archived') url += `&archived=${archivedFilter}`;
+        if (nameStyleFilter !== 'all') url += `&nameStyle=${nameStyleFilter}`;
+        const activeSearch = (searchValue || '').trim();
+        if (activeSearch) url += `&search=${encodeURIComponent(activeSearch)}`;
+        try {
+            const res = await fetch(url, { cache: 'no-store', signal: fetchController.signal });
+            if (!res.ok) throw new Error(`Wallet count fetch failed (${res.status})`);
+            const data = await res.json();
+            if (Number.isFinite(data?.totalMatches)) {
+                if (latestWalletQueryKeyRef.current !== queryKey) return;
+                setTotalMatches(data.totalMatches);
+            }
+        } catch (error) {
+            if (error?.name === 'AbortError') return;
+            setTerminalLines(prev => [...prev.slice(-200), `[ERROR] ${error.message}`]);
+        }
+    }, [minLength, typeFilter, minSideLength, exportedFilter, archivedFilter, nameStyleFilter, debouncedSearchTerm, makeWalletQueryKey]);
 
     const fetchStats = async () => {
         try {
@@ -564,11 +659,15 @@ export default function Home() {
         ? ''
         : searchDebouncing
             ? `Waiting to search "${searchTerm}"...`
-            : walletsLoading
-                ? `Searching for "${debouncedSearchTerm || searchTerm}"...`
-                : filteredWallets.length === 0
-                    ? `No matches found for "${debouncedSearchTerm || searchTerm}".`
-                    : `Found ${filteredWallets.length} match${filteredWallets.length === 1 ? '' : 'es'} for "${debouncedSearchTerm || searchTerm}".`;
+                : walletsLoading
+                    ? `Searching for "${debouncedSearchTerm || searchTerm}"...`
+                    : totalMatches === null
+                        ? `Found ${wallets.length} so far for "${debouncedSearchTerm || searchTerm}" (counting total...).`
+                        : totalMatches === 0
+                        ? `No matches found for "${debouncedSearchTerm || searchTerm}".`
+                        : wallets.length < totalMatches
+                            ? `Found ${totalMatches} matches for "${debouncedSearchTerm || searchTerm}" (showing first ${wallets.length}).`
+                            : `Found ${totalMatches} match${totalMatches === 1 ? '' : 'es'} for "${debouncedSearchTerm || searchTerm}".`;
 
     const folderRank = (folder) => {
         if (folder === 'both') return 2;
@@ -745,14 +844,36 @@ export default function Home() {
             clearInterval(pollIntervalRef.current);
             return () => clearInterval(pollIntervalRef.current);
         }
-        fetchWallets(debouncedSearchTerm);
+        fetchWallets({ searchValue: debouncedSearchTerm, offset: 0, append: false });
         if (isRunning) {
-            pollIntervalRef.current = setInterval(() => fetchWallets(debouncedSearchTerm), 12000);
+            pollIntervalRef.current = setInterval(() => fetchWallets({ searchValue: debouncedSearchTerm, offset: 0, append: false }), 12000);
         } else {
             clearInterval(pollIntervalRef.current);
         }
         return () => clearInterval(pollIntervalRef.current);
-    }, [isRunning, isStopping, minLength, typeFilter, exportedFilter, archivedFilter, nameStyleFilter, minSideLength, debouncedSearchTerm]);
+    }, [isRunning, isStopping, debouncedSearchTerm, fetchWallets]);
+
+    useEffect(() => {
+        setTotalMatches(null);
+        fetchWalletCount(debouncedSearchTerm);
+    }, [minLength, typeFilter, exportedFilter, archivedFilter, nameStyleFilter, minSideLength, debouncedSearchTerm, fetchWalletCount]);
+
+    useEffect(() => {
+        if (!hasMoreWallets || walletsLoading || walletsLoadingMore) return;
+        const sentinel = loadMoreSentinelRef.current;
+        if (!sentinel) return;
+        const observer = new IntersectionObserver((entries) => {
+            const first = entries[0];
+            if (!first?.isIntersecting) return;
+            fetchWallets({ searchValue: debouncedSearchTerm, offset: wallets.length, append: true });
+        }, {
+            root: null,
+            rootMargin: '300px 0px',
+            threshold: 0
+        });
+        observer.observe(sentinel);
+        return () => observer.disconnect();
+    }, [hasMoreWallets, walletsLoading, walletsLoadingMore, wallets.length, debouncedSearchTerm, fetchWallets]);
 
     useEffect(() => {
         setSelectedWalletKeys(prev => {
@@ -774,6 +895,12 @@ export default function Home() {
 
     useEffect(() => {
         return () => {
+            if (walletsFetchAbortRef.current) {
+                try { walletsFetchAbortRef.current.abort(); } catch { }
+            }
+            if (walletCountFetchAbortRef.current) {
+                try { walletCountFetchAbortRef.current.abort(); } catch { }
+            }
             collapseTimersRef.current.forEach((timer) => clearTimeout(timer));
             collapseTimersRef.current.clear();
         };
@@ -973,11 +1100,11 @@ export default function Home() {
                     {/* Wallet Table */}
                     <div className="card">
                         <h3 className="text-2xl mb-3 flex items-center gap-3">
-                            <span>All Wallets <span className="text-sm text-gray-500">({filteredWallets.length} shown)</span></span>
-                            {walletsLoading && (
+                            <span>All Wallets <span className="text-sm text-gray-500">({filteredWallets.length} shown / {totalMatches === null ? 'counting...' : totalMatches} total matches)</span></span>
+                            {(walletsLoading || walletsLoadingMore) && (
                                 <span className="table-loading-inline">
                                     <span className="table-spinner" aria-hidden="true" />
-                                    Updating...
+                                    {walletsLoadingMore ? 'Loading more...' : 'Updating...'}
                                 </span>
                             )}
                         </h3>
@@ -1097,7 +1224,7 @@ export default function Home() {
                                     </div>
                                 </div>
                                 <div className="text-xs text-gray-400 mt-2 min-h-[1rem]">
-                                    {walletsLoading && !searchStatusText ? 'Updating table...' : searchStatusText}
+                                    {(walletsLoading || walletsLoadingMore) && !searchStatusText ? 'Updating table...' : searchStatusText}
                                 </div>
                                 <div className="text-xs text-[#d8be74] mt-1 min-h-[1rem]">{exportUiStatus}</div>
                                 <div className="text-xs text-[#8ad8ff] mt-1 min-h-[1rem]">{archiveUiStatus}</div>
@@ -1299,6 +1426,12 @@ export default function Home() {
                                         ))}
                                     </tbody>
                                 </table>
+                                <div ref={loadMoreSentinelRef} className="h-2" aria-hidden="true" />
+                                {hasMoreWallets && (
+                                    <div className="text-xs text-gray-500 p-3">
+                                        {walletsLoadingMore ? `Loading next ${WALLET_PAGE_SIZE} wallets...` : 'Scroll down to load more...'}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>

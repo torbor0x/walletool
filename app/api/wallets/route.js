@@ -26,10 +26,32 @@ export async function GET(request) {
             : 'not-archived';
         const limitRaw = parseInt(searchParams.get('limit') || '1000', 10);
         const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 5000) : 1000;
+        const offsetRaw = parseInt(searchParams.get('offset') || '0', 10);
+        const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+        const includeTotal = searchParams.get('includeTotal') === '1';
         const includePrivateKeys = searchParams.get('includePrivateKeys') === '1';
 
-        const wallets = getFilteredWallets(minLength, type === 'all' ? null : type, search, limit, minSideLength, includePrivateKeys, exportedFilter, nameStyleFilter, archivedFilter);
-        return Response.json(wallets, {
+        const { wallets, totalMatches } = getFilteredWallets(
+            minLength,
+            type === 'all' ? null : type,
+            search,
+            limit,
+            minSideLength,
+            includePrivateKeys,
+            exportedFilter,
+            nameStyleFilter,
+            archivedFilter,
+            true,
+            offset,
+            includeTotal
+        );
+        return Response.json({
+            wallets,
+            totalMatches,
+            returnedCount: wallets.length,
+            limit,
+            offset
+        }, {
             headers: {
                 'Cache-Control': 'no-store, no-cache, must-revalidate'
             }
