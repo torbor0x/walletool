@@ -7,6 +7,7 @@ const { Keypair, Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/we
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 require('dotenv').config();
+const { getFilteredWallets: storageGetFilteredWallets } = require('./lib/storage');
 // === AUTO TIMESTAMP EVERY CONSOLE OUTPUT (works in VSCode Terminal) ===
 const originalLog = console.log;
 const originalWarn = console.warn;
@@ -173,6 +174,8 @@ function isAllowedHitShape(startMatch, endMatch) {
   return true;
 }
 
+const { addWallet } = require('./lib/sqlite_storage');
+
 function saveWallet(kp, pubStr, startMatch, endMatch) {
   if (!isAllowedHitShape(startMatch, endMatch)) return false;
   let folderName = '';
@@ -211,18 +214,25 @@ function saveWallet(kp, pubStr, startMatch, endMatch) {
     const pubShort = pubStr.substring(0, 8) + '...' + pubStr.substring(pubStr.length - 8);
     console.log(`${rarityLevel} ${sLen && eLen ? `${sLen}+${eLen} BOTH` : (sLen ? `${sLen} START` : `${eLen} END`)} → ${vanityDisplay}  [${pubShort}]`);
   }
-  // Compact record - NO console spam for normal saves
-  const jsonlPath = DB_PATHS[folderName];
+  // Save to SQLite database instead of JSONL
   const walletRecord = {
     publicKey: pubStr,
     secretKeyBase64: secretKeyToBase64(kp.secretKey),
     generatedAt: new Date().toISOString(),
     startMatch: startUpper,
     endMatch: endUpper,
-    type: folderName
+    folder: folderName
   };
-  const line = JSON.stringify(walletRecord) + '\n';
-  fs.appendFileSync(jsonlPath, line);
+
+  // Add to SQLite database (async but we'll make it work in sync context)
+  try {
+    addWallet(walletRecord).catch(err => {
+      console.error('Failed to save wallet to SQLite:', err.message);
+    });
+  } catch (err) {
+    console.error('Error adding wallet:', err.message);
+  }
+
   return true;
 }
 // ==================== CHECKED WALLETS HELPERS ====================
@@ -904,18 +914,29 @@ async function runRepeatingGeneration(cycleMinutes) {
   let cycleCount = 0;
   let currentWorkers = [];
   const gracefulShutdown = async () => {
-    console.log('Graceful shutdown triggered - sending stop signal to all workers...');
-    currentWorkers.forEach(w => {
-      if (w) w.postMessage({ type: 'shutdown' });
-    });
-    await new Promise(r => setTimeout(r, 800));
-    console.log('Forcing remaining workers to terminate...');
-    currentWorkers.forEach(w => w && w.terminate());
-    await waitForWorkersToExit(currentWorkers, 1500);
-    buildIndex();
-    forceGC();
-    console.log('All workers stopped cleanly. Index rebuilt. Memory should now be released.');
-    process.exit(0);
+    console.log('\n🛑 Stopping all workers gracefully...');
+    stopRequestedFlag = true;
+    for (const worker of workers) {
+      worker.postMessage({ type: 'shutdown' });
+    }
+    // Wait for all workers to finish
+    let remaining = workers.length;
+    for (const worker of workers) {
+      worker.on('message', (msg) => {
+        if (msg.type === 'shutdown_complete') {
+          remaining--;
+          if (remaining === 0) {
+            console.log('All workers stopped cleanly. SQLite database updated. Memory should now be released.');
+            process.exit(0);
+          }
+        }
+      });
+    }
+    // Force exit after 10 seconds
+    setTimeout(() => {
+      console.log('Force exit after timeout');
+      process.exit(0);
+    }, 10000);
   };
   process.on('SIGINT', gracefulShutdown);
   process.on('SIGTERM', gracefulShutdown);
@@ -1077,7 +1098,23 @@ if (MODE === 'list' || MODE === 'search') {
       if (!isNaN(num) && num >= 2) minLength = num;
     }
   }
-  let filteredWallets = getFilteredWallets(minLength, typeFilter, isSearchMode ? searchTerm : '', minSideLength);
+  const storageResult = storageGetFilteredWallets(
+    minLength,
+    typeFilter,
+    isSearchMode ? searchTerm : '',
+    Infinity,
+    minSideLength,
+    false,
+    'all',
+    'all',
+    'all',
+    true,
+    0,
+    false
+  );
+  let filteredWallets = Array.isArray(storageResult)
+    ? storageResult
+    : (Array.isArray(storageResult?.wallets) ? storageResult.wallets : []);
   filteredWallets.sort((a, b) => {
     if (a.folder === 'both' && b.folder !== 'both') return -1;
     if (b.folder === 'both' && a.folder !== 'both') return 1;

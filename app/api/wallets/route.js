@@ -1,5 +1,5 @@
 // app/api/wallets/route.js
-import { getFilteredWallets } from '../../../lib/storage';
+import { getFilteredWallets } from '../../../lib/sqlite_storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,20 +31,21 @@ export async function GET(request) {
         const includeTotal = searchParams.get('includeTotal') === '1';
         const includePrivateKeys = searchParams.get('includePrivateKeys') === '1';
 
-        const { wallets, totalMatches } = getFilteredWallets(
+        const result = await getFilteredWallets({
             minLength,
-            type === 'all' ? null : type,
-            search,
+            typeFilter: type === 'all' ? null : type,
+            searchInput: search,
             limit,
+            offset,
             minSideLength,
             includePrivateKeys,
             exportedFilter,
             nameStyleFilter,
             archivedFilter,
-            true,
-            offset,
-            includeTotal
-        );
+            countTotal: includeTotal
+        });
+
+        const { wallets, totalMatches } = result;
         return Response.json({
             wallets,
             totalMatches,
