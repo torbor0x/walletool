@@ -1,5 +1,13 @@
+# macOS
+.DS_Store
+
+# Wallets / secrets / databases
 /novelty_wallets
-/node_modules
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
 .env
 .next
 
