@@ -55,6 +55,7 @@ export default function Home() {
     const walletsFetchAbortRef = useRef(null);
     const walletCountFetchAbortRef = useRef(null);
     const latestWalletQueryKeyRef = useRef('');
+    const lastCountQueryKeyRef = useRef('');
     const loadMoreSentinelRef = useRef(null);
     const collapseTimersRef = useRef(new Map());
 
@@ -92,6 +93,7 @@ export default function Home() {
         let url = buildWalletUrl();
         const activeSearch = (searchValue || '').trim();
         if (activeSearch) url += `&search=${encodeURIComponent(activeSearch)}`;
+        let applied = false;
         try {
             if (!append && Math.max(0, offset) === 0) {
                 setHasMoreWallets(false);
@@ -107,7 +109,7 @@ export default function Home() {
             const nextTotalMatches = Number.isFinite(data?.totalMatches)
                 ? data.totalMatches
                 : null;
-            if (latestWalletQueryKeyRef.current !== queryKey) return;
+            if (latestWalletQueryKeyRef.current !== queryKey) return false;
             const fetchedOffset = Math.max(0, offset);
             const loadedCount = fetchedOffset + nextWallets.length;
             const moreByCount = Number.isFinite(nextTotalMatches)
@@ -126,6 +128,7 @@ export default function Home() {
                 }
                 setTotalMatches(nextTotalMatches);
                 setHasMoreWallets(moreByCount);
+                applied = true;
             } else {
                 if (append) {
                     setWallets(prev => {
@@ -140,6 +143,7 @@ export default function Home() {
                     setTotalMatches(nextTotalMatches);
                 }
                 setHasMoreWallets(moreByCount);
+                applied = true;
             }
         } catch (error) {
             if (error?.name === 'AbortError') return;
@@ -148,6 +152,7 @@ export default function Home() {
             if (append) setWalletsLoadingMore(false);
             else setWalletsLoading(false);
         }
+        return applied;
     }, [minLength, typeFilter, minSideLength, exportedFilter, archivedFilter, nameStyleFilter, debouncedSearchTerm, makeWalletQueryKey]);
 
     const fetchWalletCount = useCallback(async (searchValue = debouncedSearchTerm) => {
@@ -178,6 +183,16 @@ export default function Home() {
             setTerminalLines(prev => [...prev.slice(-200), `[ERROR] ${error.message}`]);
         }
     }, [minLength, typeFilter, minSideLength, exportedFilter, archivedFilter, nameStyleFilter, debouncedSearchTerm, makeWalletQueryKey]);
+
+    const refreshWallets = useCallback(async (searchValue = debouncedSearchTerm) => {
+        const queryKey = makeWalletQueryKey(searchValue);
+        const applied = await fetchWallets({ searchValue, offset: 0, append: false });
+        if (!applied) return;
+        if (lastCountQueryKeyRef.current !== queryKey) {
+            lastCountQueryKeyRef.current = queryKey;
+            fetchWalletCount(searchValue);
+        }
+    }, [debouncedSearchTerm, fetchWallets, fetchWalletCount, makeWalletQueryKey]);
 
     const fetchStats = async () => {
         try {
@@ -838,25 +853,26 @@ export default function Home() {
         return () => clearTimeout(timer);
     }, [searchTerm, SEARCH_DEBOUNCE_MS]);
 
+    // Refresh wallets when filters/search change
+    useEffect(() => {
+        setTotalMatches(null);
+        lastCountQueryKeyRef.current = '';
+        refreshWallets(debouncedSearchTerm);
+    }, [minLength, typeFilter, exportedFilter, archivedFilter, nameStyleFilter, minSideLength, debouncedSearchTerm, refreshWallets]);
+
     // Poll wallets when running
     useEffect(() => {
         if (isStopping) {
             clearInterval(pollIntervalRef.current);
             return () => clearInterval(pollIntervalRef.current);
         }
-        fetchWallets({ searchValue: debouncedSearchTerm, offset: 0, append: false });
         if (isRunning) {
-            pollIntervalRef.current = setInterval(() => fetchWallets({ searchValue: debouncedSearchTerm, offset: 0, append: false }), 12000);
+            pollIntervalRef.current = setInterval(() => refreshWallets(debouncedSearchTerm), 12000);
         } else {
             clearInterval(pollIntervalRef.current);
         }
         return () => clearInterval(pollIntervalRef.current);
-    }, [isRunning, isStopping, debouncedSearchTerm, fetchWallets]);
-
-    useEffect(() => {
-        setTotalMatches(null);
-        fetchWalletCount(debouncedSearchTerm);
-    }, [minLength, typeFilter, exportedFilter, archivedFilter, nameStyleFilter, minSideLength, debouncedSearchTerm, fetchWalletCount]);
+    }, [isRunning, isStopping, debouncedSearchTerm, refreshWallets]);
 
     useEffect(() => {
         if (!hasMoreWallets || walletsLoading || walletsLoadingMore) return;
@@ -930,7 +946,7 @@ export default function Home() {
                     </div>
                 </div>
 
-                <div className="card mb-6">
+                <div className="card mb-6 controls-card">
                     <div className="controls-terminal-row">
                         <div>
                             <h2 className="text-2xl gold mb-6">Farming Controls</h2>
@@ -956,6 +972,7 @@ export default function Home() {
 
                                 <div className="flex gap-3">
                                     <button
+                                        type="button"
                                         onClick={startFarming}
                                         disabled={isRunning || isStopping}
                                         className="flex-1 neo-btn py-4 text-lg disabled:opacity-50"
@@ -964,6 +981,7 @@ export default function Home() {
                                     </button>
                                     {(isRunning || isStopping) && (
                                         <button
+                                            type="button"
                                             onClick={stopFarming}
                                             disabled={!isRunning || isStopping}
                                             className="flex-1 neo-btn py-4 text-lg disabled:opacity-50"
@@ -972,6 +990,7 @@ export default function Home() {
                                         </button>
                                     )}
                                     <button
+                                        type="button"
                                         onClick={() => setShowInfoPanel(prev => !prev)}
                                         className={`flex-1 py-4 text-sm ${showInfoPanel ? 'neo-btn-solid' : 'neo-btn'}`}
                                     >

@@ -1,5 +1,5 @@
 // app/api/stats/route.js
-import { getWalletStats } from '../../../lib/storage';
+import { getWalletStats } from '../../../lib/sqlite_storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,7 +15,7 @@ export async function GET() {
         });
     }
 
-    const stats = getWalletStats();
+    const stats = await getWalletStats();
     cached = stats;
     cachedAt = now;
 

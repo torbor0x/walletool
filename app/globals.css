@@ -66,6 +66,11 @@
     align-items: start;
   }
 
+  .controls-card {
+    position: relative;
+    z-index: 30;
+  }
+
   @media (min-width: 980px) {
     .controls-terminal-row {
       grid-template-columns: 1fr 1fr;

@@ -6,8 +6,9 @@ const { execSync } = require('child_process');
 const { Keypair, Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
-require('dotenv').config();
-const { getFilteredWallets: storageGetFilteredWallets } = require('./lib/storage');
+require('dotenv').config({ quiet: true });
+const { getFilteredWallets: storageGetFilteredWallets } = require('./lib/sqlite_storage');
+const { addWallet } = require('./lib/sqlite_storage');
 // === AUTO TIMESTAMP EVERY CONSOLE OUTPUT (works in VSCode Terminal) ===
 const originalLog = console.log;
 const originalWarn = console.warn;
@@ -36,6 +37,12 @@ const baseTerms = require('./baseTerms').default;
 const MODE = process.argv[2] || 'generate';
 const ALL_ARGS = process.argv.slice(2);
 const STOP_FILE = process.env.WALLETOOL_STOP_FILE || '';
+const SQLITE_SAVE_BATCH_SIZE = 50;
+const SQLITE_SAVE_FLUSH_MS = 250;
+
+let pendingWalletQueue = [];
+let flushTimer = null;
+let flushInFlight = null;
 
 function stopRequested() {
   if (!STOP_FILE) return false;
@@ -43,6 +50,58 @@ function stopRequested() {
     return fs.existsSync(STOP_FILE);
   } catch (e) {
     return false;
+  }
+}
+
+function scheduleWalletFlush() {
+  if (!isMainThread) return;
+  if (flushTimer || pendingWalletQueue.length === 0) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flushWalletQueue();
+  }, SQLITE_SAVE_FLUSH_MS);
+}
+
+function queueWalletForPersistence(walletRecord) {
+  if (!walletRecord) return;
+  pendingWalletQueue.push(walletRecord);
+  if (pendingWalletQueue.length >= SQLITE_SAVE_BATCH_SIZE) {
+    void flushWalletQueue();
+    return;
+  }
+  scheduleWalletFlush();
+}
+
+async function flushWalletQueue() {
+  if (!isMainThread) return;
+  if (flushInFlight) return flushInFlight;
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (pendingWalletQueue.length === 0) return;
+
+  flushInFlight = (async () => {
+    while (pendingWalletQueue.length > 0) {
+      const batch = pendingWalletQueue.splice(0, SQLITE_SAVE_BATCH_SIZE);
+      try {
+        await addWallet(batch);
+      } catch (err) {
+        pendingWalletQueue = [...batch, ...pendingWalletQueue];
+        console.error(`Failed to flush ${batch.length} wallet(s) to SQLite: ${err.message}`);
+        await new Promise(r => setTimeout(r, 500));
+        break;
+      }
+    }
+  })();
+
+  try {
+    await flushInFlight;
+  } finally {
+    flushInFlight = null;
+    if (pendingWalletQueue.length > 0) {
+      scheduleWalletFlush();
+    }
   }
 }
 
@@ -153,7 +212,9 @@ baseTerms.forEach((term) => {
   allTargets.push(...generateLeetVariants(term));
 });
 const targets = [...new Set(allTargets)].sort((a, b) => b.length - a.length);
-console.log(`Loaded ${targets.length} unique search patterns from baseTerms.js`);
+if (isMainThread) {
+  console.log(`Loaded ${targets.length} unique search patterns from baseTerms.js`);
+}
 function findLongestMatch(pubLower, isPrefix) {
   for (let t of targets) {
     if (isPrefix ? pubLower.startsWith(t) : pubLower.endsWith(t)) {
@@ -173,8 +234,6 @@ function isAllowedHitShape(startMatch, endMatch) {
   if ((sLen > 0 && eLen === 0 && sLen < 3) || (eLen > 0 && sLen === 0 && eLen < 3)) return false;
   return true;
 }
-
-const { addWallet } = require('./lib/sqlite_storage');
 
 function saveWallet(kp, pubStr, startMatch, endMatch) {
   if (!isAllowedHitShape(startMatch, endMatch)) return false;
@@ -224,13 +283,10 @@ function saveWallet(kp, pubStr, startMatch, endMatch) {
     folder: folderName
   };
 
-  // Add to SQLite database (async but we'll make it work in sync context)
-  try {
-    addWallet(walletRecord).catch(err => {
-      console.error('Failed to save wallet to SQLite:', err.message);
-    });
-  } catch (err) {
-    console.error('Error adding wallet:', err.message);
+  if (!isMainThread && parentPort) {
+    parentPort.postMessage({ type: 'wallet-found', wallet: walletRecord });
+  } else {
+    queueWalletForPersistence(walletRecord);
   }
 
   return true;
@@ -916,18 +972,20 @@ async function runRepeatingGeneration(cycleMinutes) {
   const gracefulShutdown = async () => {
     console.log('\n🛑 Stopping all workers gracefully...');
     stopRequestedFlag = true;
-    for (const worker of workers) {
+    for (const worker of currentWorkers) {
       worker.postMessage({ type: 'shutdown' });
     }
     // Wait for all workers to finish
-    let remaining = workers.length;
-    for (const worker of workers) {
+    let remaining = currentWorkers.length;
+    for (const worker of currentWorkers) {
       worker.on('message', (msg) => {
         if (msg.type === 'shutdown_complete') {
           remaining--;
           if (remaining === 0) {
-            console.log('All workers stopped cleanly. SQLite database updated. Memory should now be released.');
-            process.exit(0);
+            void flushWalletQueue().then(() => {
+              console.log('All workers stopped cleanly. SQLite database updated. Memory should now be released.');
+              process.exit(0);
+            });
           }
         }
       });
@@ -965,6 +1023,8 @@ async function runRepeatingGeneration(cycleMinutes) {
             const rate = Math.floor(totalKeys / elapsed);
             console.log(`Progress: ${Math.floor(totalKeys / 1000000)}M keys | ~${rate} keys/sec`);
           }
+        } else if (msg.type === 'wallet-found' && msg.wallet) {
+          queueWalletForPersistence(msg.wallet);
         }
       });
       workers.push(worker);
@@ -999,6 +1059,7 @@ async function runRepeatingGeneration(cycleMinutes) {
     console.log(`Cycle ${cycleCount} finished after ${actualMinutes} minutes.`);
     workers.forEach(w => w.postMessage({ type: 'shutdown' }));
     await waitForWorkersToExit(workers, 1200);
+    await flushWalletQueue();
     buildIndex();
     forceGC();
     console.log(`Cycle ${cycleCount} complete. Index rebuilt.`);
@@ -1227,6 +1288,8 @@ if (isMainThread) {
             const rate = Math.floor(totalKeys / elapsed);
             console.log(`Progress: ${Math.floor(totalKeys / 1000000)}M keys | ~${rate} keys/sec`);
           }
+        } else if (msg.type === 'wallet-found' && msg.wallet) {
+          queueWalletForPersistence(msg.wallet);
         }
       });
       workers.push(worker);
@@ -1262,6 +1325,7 @@ if (isMainThread) {
     console.log('Forcing terminate on any remaining workers...');
     workers.forEach((w) => w && w.terminate());
     await waitForWorkersToExit(workers, 1500);
+    await flushWalletQueue();
     buildIndex();
     forceGC();
     console.log('Session finished. All workers stopped cleanly. Index is now ready for fast list/search.');

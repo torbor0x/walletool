@@ -1,4 +1,4 @@
-import { getWalletPrivateKeys } from '../../../../lib/storage';
+import { getWalletPrivateKeys } from '../../../../lib/sqlite_storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -6,7 +6,7 @@ export async function POST(request) {
     try {
         const body = await request.json();
         const publicKeys = Array.isArray(body?.publicKeys) ? body.publicKeys : [];
-        const result = getWalletPrivateKeys(publicKeys);
+        const result = await getWalletPrivateKeys(publicKeys);
         return Response.json(result, {
             headers: {
                 'Cache-Control': 'no-store, no-cache, must-revalidate'

@@ -64,10 +64,28 @@ The CLI includes **thermal protection** optimized for macOS (especially fanless 
 
 - Detects thermal pressure via `powermetrics`.
 - Automatically pauses generation when the machine runs hot and resumes once it cools.
-- If `powermetrics` requires `sudo`, run the CLI once with `sudo` so the password is cached, or grant your terminal Full Disk Access in **System Settings → Privacy & Security**.
 - On non-macOS systems the thermal layer falls back gracefully to "Unknown" and generation continues normally.
 
 > **Note:** thermal monitoring is designed for Apple Silicon Macs. Linux and Windows users can still run the generator; the heat-throttle logic simply does not activate.
+
+### Avoiding `sudo` password prompts for `powermetrics`
+
+`powermetrics` often requires `sudo`. To let the CLI check temperature without typing a password each time, add a `sudoers` rule:
+
+```bash
+# Replace $USER with your actual macOS username if needed
+sudo visudo -f /etc/sudoers.d/powermetrics
+```
+
+Paste this line into the editor (replace `your_username` with your actual username):
+
+```
+your_username ALL=(ALL) NOPASSWD: /usr/bin/powermetrics
+```
+
+Save and exit. The CLI will now read thermal pressure silently.
+
+If you prefer not to edit `sudoers`, run the CLI once with `sudo` so the password is cached for a few minutes, or grant your terminal **Full Disk Access** in **System Settings → Privacy & Security**.
 
 ---
 
