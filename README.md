@@ -147,4 +147,4 @@ baseTerms.example.js      Starter term list example
 
 ## License
 
-Personal tooling — use at your own risk. Always audit any code that handles private keys.
+MIT — see [LICENSE](LICENSE).
