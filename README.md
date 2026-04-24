@@ -141,6 +141,7 @@ baseTerms.example.js      Starter term list example
 - Node.js 18+
 - macOS recommended for thermal protection (optional)
 - `sqlite3` native module will compile on first install
+- Database (`novelty_wallets/wallets.db`) auto-creates on first run — no manual migration needed
 
 ---
 
